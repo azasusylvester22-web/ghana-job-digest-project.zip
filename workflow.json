@@ -1,0 +1,171 @@
+{
+  "name": "Ghana IT Jobs Daily Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24,
+              "triggerAtHour": 7
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every Day 7am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-600, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://www.jobberman.com.gh/jobs/software-data",
+        "options": {}
+      },
+      "id": "fetch-jobberman",
+      "name": "Fetch Jobberman (Software & Data)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-360, 80]
+    },
+    {
+      "parameters": {
+        "url": "https://jobwebghana.com/job-category/it-telecom-jobs-in-ghana/",
+        "options": {}
+      },
+      "id": "fetch-jobweb",
+      "name": "Fetch JobWebGhana (IT/Telecom category)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-360, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Jobberman job listing links reliably follow the pattern\n// https://www.jobberman.com.gh/listings/<slug>\n// with the job title as the link text, so we match on that directly.\nconst html = $input.first().json.data;\nconst jobs = [];\nconst linkRegex = /<a[^>]+href=\"(https:\\/\\/www\\.jobberman\\.com\\.gh\\/listings\\/[^\"?]+)\"[^>]*(?:title=\"([^\"]+)\")?[^>]*>([^<]{3,150})<\\/a>/g;\nlet match;\nconst seen = new Set();\n\nwhile ((match = linkRegex.exec(html)) !== null) {\n  const link = match[1];\n  const title = (match[2] || match[3] || '').trim();\n  if (title && !seen.has(link)) {\n    seen.add(link);\n    jobs.push({ title, link, source: 'Jobberman' });\n  }\n}\n\nreturn jobs.map(j => ({ json: j }));"
+      },
+      "id": "parse-jobberman",
+      "name": "Parse Jobberman Listings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-140, 80]
+    },
+    {
+      "parameters": {
+        "jsCode": "// JobWebGhana runs on WordPress + the JobRoller plugin.\n// Job links reliably follow the pattern https://jobwebghana.com/jobs/<slug>/\n// with the job+company title as the link text, so we match on that pattern\n// directly instead of relying on CSS classes (which are more likely to change).\nconst html = $input.first().json.data;\nconst jobs = [];\nconst linkRegex = /<a[^>]+href=\"(https:\\/\\/jobwebghana\\.com\\/jobs\\/[^\"]+)\"[^>]*>([^<]{10,150})<\\/a>/g;\nlet match;\nconst seen = new Set();\n\nwhile ((match = linkRegex.exec(html)) !== null) {\n  const link = match[1];\n  const title = match[2].trim();\n  if (title && !seen.has(link) && !/facebook|sharer|feed/i.test(link)) {\n    seen.add(link);\n    jobs.push({ title, link, source: 'JobWebGhana' });\n  }\n}\n\nreturn jobs.map(j => ({ json: j }));"
+      },
+      "id": "parse-jobweb",
+      "name": "Parse JobWebGhana Listings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-140, 320]
+    },
+    {
+      "parameters": {
+        "mode": "append"
+      },
+      "id": "merge-sources",
+      "name": "Merge Both Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [80, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keep only IT/Software/Tech-relevant listings, and drop ones we've already emailed before.\nconst keywords = /developer|software|IT\\b|tech|programmer|network|cyber|data|system admin|it officer|full[- ]stack|backend|frontend|devops|database|IT support/i;\n\nconst items = $input.all().map(i => i.json).filter(j => j.title && keywords.test(j.title));\n\n// Dedup within this run\nconst seenLinks = new Set();\nconst deduped = items.filter(j => {\n  if (seenLinks.has(j.link)) return false;\n  seenLinks.add(j.link);\n  return true;\n});\n\n// Cross-run memory: track links we've already sent using workflow static data\nconst staticData = $getWorkflowStaticData('global');\nif (!staticData.sentLinks) staticData.sentLinks = [];\nconst alreadySent = new Set(staticData.sentLinks);\n\nconst newJobs = deduped.filter(j => !alreadySent.has(j.link));\n\n// Update memory (cap at last 500 to avoid unbounded growth)\nstaticData.sentLinks = [...alreadySent, ...newJobs.map(j => j.link)].slice(-500);\n\nreturn newJobs.map(j => ({ json: j }));"
+      },
+      "id": "filter-dedupe",
+      "name": "Filter IT Jobs & Remove Duplicates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $items().length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-new-jobs",
+      "name": "Only Continue If New Jobs Found",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [520, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const jobs = $input.all().map(i => i.json);\nconst rows = jobs.map(j => `<li><a href=\"${j.link}\">${j.title}</a> — <em>${j.source}</em></li>`).join('\\n');\nconst html = `<h2>Today's IT/Tech Job Listings in Ghana</h2><ul>${rows}</ul>`;\nreturn [{ json: { emailHtml: html, jobCount: jobs.length } }];"
+      },
+      "id": "format-email",
+      "name": "Format Digest Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [740, 140]
+    },
+    {
+      "parameters": {
+        "fromEmail": "your-sender-email@example.com",
+        "toEmail": "your-email@example.com",
+        "subject": "Ghana IT/Tech Jobs — Daily Digest",
+        "emailFormat": "html",
+        "html": "={{ $json.emailHtml }}",
+        "options": {}
+      },
+      "id": "send-email",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [960, 140]
+    }
+  ],
+  "connections": {
+    "Every Day 7am": {
+      "main": [
+        [
+          { "node": "Fetch Jobberman (Software & Data)", "type": "main", "index": 0 },
+          { "node": "Fetch JobWebGhana (IT/Telecom category)", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Fetch Jobberman (Software & Data)": {
+      "main": [[{ "node": "Parse Jobberman Listings", "type": "main", "index": 0 }]]
+    },
+    "Fetch JobWebGhana (IT/Telecom category)": {
+      "main": [[{ "node": "Parse JobWebGhana Listings", "type": "main", "index": 0 }]]
+    },
+    "Parse Jobberman Listings": {
+      "main": [[{ "node": "Merge Both Sources", "type": "main", "index": 0 }]]
+    },
+    "Parse JobWebGhana Listings": {
+      "main": [[{ "node": "Merge Both Sources", "type": "main", "index": 1 }]]
+    },
+    "Merge Both Sources": {
+      "main": [[{ "node": "Filter IT Jobs & Remove Duplicates", "type": "main", "index": 0 }]]
+    },
+    "Filter IT Jobs & Remove Duplicates": {
+      "main": [[{ "node": "Only Continue If New Jobs Found", "type": "main", "index": 0 }]]
+    },
+    "Only Continue If New Jobs Found": {
+      "main": [[{ "node": "Format Digest Email", "type": "main", "index": 0 }]]
+    },
+    "Format Digest Email": {
+      "main": [[{ "node": "Send Email", "type": "main", "index": 0 }]]
+    }
+  }
+}
